@@ -1,0 +1,94 @@
+---
+- name: Configure PingFederate to use PostgreSQL
+  hosts: pingfederate_servers
+  become: yes
+  vars_files:
+    - vars.yml
+
+  tasks:
+    - name: Get PingFederate Admin API Access Token
+      ansible.builtin.uri:
+        url: "https://{{ pingfederate_admin_api_host }}:{{ pingfederate_admin_api_port }}/as/token.oauth2"
+        method: POST
+        body: "grant_type=client_credentials&client_id={{ pingfederate_admin_client_id }}&client_secret={{ pingfederate_admin_client_secret }}"
+        headers:
+          Content-Type: "application/x-www-form-urlencoded"
+        validate_certs: false # Set to 'true' in a production environment
+      register: token_response
+      delegate_to: localhost
+
+    - name: Create new PostgreSQL JDBC datastore
+      ansible.builtin.uri:
+        url: "https://{{ pingfederate_admin_api_host }}:{{ pingfederate_admin_api_port }}/pf-admin-api/v1/dataStores"
+        method: POST
+        headers:
+          Content-Type: "application/json"
+          Authorization: "Bearer {{ token_response.json.access_token }}"
+        body: "{{ lookup('template', 'jdbc_datastore.json.j2') }}"
+        body_format: json
+        validate_certs: false # Set to 'true' in a production environment
+      register: datastore_response
+      delegate_to: localhost
+
+    - name: Get new datastore system ID
+      ansible.builtin.set_fact:
+        new_datastore_system_id: "{{ datastore_response.json.id }}"
+      delegate_to: localhost
+
+    - name: Stop PingFederate server
+      ansible.builtin.command: /opt/ping/pingfederate/bin/stop-pingfederate.sh
+      args:
+        chdir: /opt/ping/pingfederate/bin
+
+    - name: Replace placeholder in org.sourceid.oauth20.token.AccessGrantManagerJdbcImpl.xml
+      ansible.builtin.lineinfile:
+        path: /opt/ping/pingfederate/server/default/data/config-store/org.sourceid.oauth20.token.AccessGrantManagerJdbcImpl.xml
+        regexp: '^(\s*<c:item name="PingFederateDSJNDIName">)(.*?)(</c:item>)'
+        line: '\1{{ new_datastore_system_id }}\3'
+        state: present
+        backrefs: true
+
+    - name: Replace placeholder in org.sourceid.oauth20.domain.ClientManagerJdbcImpl.xml
+      ansible.builtin.lineinfile:
+        path: /opt/ping/pingfederate/server/default/data/config-store/org.sourceid.oauth20.domain.ClientManagerJdbcImpl.xml
+        regexp: '^(\s*<c:item name="PingFederateDSJNDIName">)(.*?)(</c:item>)'
+        line: '\1{{ new_datastore_system_id }}\3'
+        state: present
+        backrefs: true
+
+    - name: Start PingFederate server
+      ansible.builtin.command: /opt/ping/pingfederate/bin/start-pingfederate.sh
+      args:
+        chdir: /opt/ping/pingfederate/bin
+
+    - name: Wait for PingFederate to start
+      ansible.builtin.wait_for:
+        port: 9031 # Assumes standard runtime port
+        timeout: 300
+
+    - name: Replicate cluster configuration
+      ansible.builtin.uri:
+        url: "https://{{ pingfederate_admin_api_host }}:{{ pingfederate_admin_api_port }}/pf-admin-api/v1/cluster/replicate"
+        method: POST
+        headers:
+          Content-Type: "application/json"
+          Authorization: "Bearer {{ token_response.json.access_token }}"
+        body_format: json
+        validate_certs: false # Set to 'true' in a production environment
+      delegate_to: localhost
+      ignore_errors: true # Ignore if not a cluster, but good practice to include
+
+### Jinja2 template (`jdbc_datastore.json.j2`)
+This template creates the JSON payload for the datastore creation API call.
+
+```json
+{
+  "name": "PostgreSQL Datastore",
+  "type": "JDBC",
+  "jdbcUrl": "jdbc:postgresql://{{ db_server_ip }}:5432/pingfed",
+  "driverClass": "org.postgresql.Driver",
+  "username": "{{ db_username }}",
+  "password": "{{ db_password }}",
+  "validateConnectionSql": "SELECT 1",
+  "maskValuesInLogs": false
+}
