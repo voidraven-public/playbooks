@@ -1,0 +1,14 @@
+### Jinja2 template (`jdbc_datastore.json.j2`)
+This template creates the JSON payload for the datastore creation API call.
+
+```json
+{
+  "name": "PostgreSQL Datastore",
+  "type": "JDBC",
+  "jdbcUrl": "jdbc:postgresql://{{ db_server_ip }}:5432/pingfed",
+  "driverClass": "org.postgresql.Driver",
+  "username": "{{ db_username }}",
+  "password": "{{ db_password }}",
+  "validateConnectionSql": "SELECT 1",
+  "maskValuesInLogs": false
+}
